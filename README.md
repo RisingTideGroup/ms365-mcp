@@ -1,6 +1,10 @@
 # Lokka
 
-[![npm version](https://badge.fury.io/js/@merill%2Flokka.svg)](https://badge.fury.io/js/@merill%2Flokka)
+[![npm version](https://img.shields.io/npm/v/@merill/lokka?logo=npm&color=cb3837)](https://www.npmjs.com/package/@merill/lokka)
+[![downloads](https://img.shields.io/npm/d18m/@merill/lokka?label=downloads&color=blue)](https://www.npmjs.com/package/@merill/lokka)
+[![downloads per month](https://img.shields.io/npm/dm/@merill/lokka?label=downloads%2Fmonth&color=blue)](https://www.npmjs.com/package/@merill/lokka)
+[![GitHub stars](https://img.shields.io/github/stars/merill/lokka?style=flat&logo=github)](https://github.com/merill/lokka/stargazers)
+[![license](https://img.shields.io/github/license/merill/lokka?color=green)](https://github.com/merill/lokka/blob/main/LICENSE)
 
 Lokka is a model-context-protocol server for the Microsoft Graph and Azure RM APIs that allows you to query and manage your Azure and Microsoft 365 tenants with AI.
 
