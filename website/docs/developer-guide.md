@@ -65,6 +65,7 @@ Follow this guide if you want to build Lokka from source to contribute to the pr
 - Exit Claude Desktop and restart it.
   - Every time you make changes to the code or configuration, you need to restart Claude desktop for the changes to take effect.
   - Note: In Windows, Claude doesn't exit when you close the window, it runs in the background. You can find it in the system tray. Right-click on the icon and select **Quit** to exit the application completely.
+  - Tip: In Windows, you can end Claude from the taskbar directly, by right-clicking and selecting "End task". This feature can be enabled from Settings -> System -> Advanced. Under the taskbar section, there is a setting called: "End task - Enable end task in taskbar by right click".
 
 ### Testing the agent
 
