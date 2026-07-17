@@ -44,7 +44,7 @@ export class TokenVerifier {
       `https://login.microsoftonline.com/${config.tenantId}/v2.0`, // v2 tokens
       `https://sts.windows.net/${config.tenantId}/`,               // v1 tokens
     ];
-    this.validAudiences = [config.clientId, `api://${config.clientId}`];
+    this.validAudiences = [config.clientId, `api://${config.clientId}`, config.appIdUri];
   }
 
   async verify(authorizationHeader: string | undefined): Promise<VerifiedUser> {

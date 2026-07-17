@@ -38,7 +38,7 @@ app.use((req, res, next) => {
 const prm = {
   resource: `${config.baseUrl}/mcp`,
   authorization_servers: [`https://login.microsoftonline.com/${config.tenantId}/v2.0`],
-  scopes_supported: [`api://${config.clientId}/${config.scopeName}`],
+  scopes_supported: [`${config.appIdUri}/${config.scopeName}`],
   bearer_methods_supported: ["header"],
   resource_name: "Lokka (delegated Microsoft Graph MCP)"
 };
@@ -155,5 +155,6 @@ app.listen(config.port, () => {
   logger.info(`Lokka HTTP (delegated OAuth) listening on :${config.port}`);
   logger.info(`Resource: ${config.baseUrl}/mcp`);
   logger.info(`Authorization server: https://login.microsoftonline.com/${config.tenantId}/v2.0`);
-  logger.info(`Required scope: api://${config.clientId}/${config.scopeName}`);
+  logger.info(`Required scope: ${config.appIdUri}/${config.scopeName}`);
+  logger.info(`Expected token audiences: ${config.clientId}, api://${config.clientId}, ${config.appIdUri}`);
 });

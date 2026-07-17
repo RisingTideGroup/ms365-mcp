@@ -16,7 +16,7 @@ class TokenVerifier {
       `https://sts.windows.net/${config.tenantId}/`
       // v1 tokens
     ];
-    this.validAudiences = [config.clientId, `api://${config.clientId}`];
+    this.validAudiences = [config.clientId, `api://${config.clientId}`, config.appIdUri];
   }
   async verify(authorizationHeader) {
     if (!authorizationHeader || !authorizationHeader.toLowerCase().startsWith("bearer ")) {
