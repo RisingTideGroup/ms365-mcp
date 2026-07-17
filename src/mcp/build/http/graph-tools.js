@@ -1,0 +1,259 @@
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { z } from "zod";
+import { Client, PageIterator } from "@microsoft/microsoft-graph-client";
+import { logger } from "../logger.js";
+import { GRAPH_SCOPE, AZURE_RM_SCOPE } from "./obo.js";
+function createSessionContext(user, broker, useGraphBeta) {
+  let assertion = user.rawToken;
+  let assertionExp = user.expiresAt;
+  return {
+    user,
+    broker,
+    useGraphBeta,
+    refreshAssertion(token, expiresAt) {
+      assertion = token;
+      assertionExp = expiresAt;
+    },
+    getAssertion() {
+      if (assertionExp && assertionExp * 1e3 < Date.now()) {
+        logger.info(`Assertion for user ${user.oid} is expired; relying on client to re-authenticate`);
+      }
+      return assertion;
+    }
+  };
+}
+function validateAzurePath(path) {
+  if (!path) {
+    throw new Error("Path cannot be empty");
+  }
+  const forbiddenPatterns = [
+    { pattern: /@/, reason: "contains @ (host-escape character)" },
+    { pattern: /\/{2,}/, reason: "contains double slashes (protocol-relative URL)" },
+    { pattern: /^https?:\/\//i, reason: "is an absolute URL" },
+    { pattern: /\\/g, reason: "contains backslashes" }
+  ];
+  for (const { pattern, reason } of forbiddenPatterns) {
+    if (pattern.test(path)) {
+      logger.error(`Invalid Azure path rejected: ${reason}. Path: ${path}`);
+      throw new Error(`Invalid path: ${reason}. Path must be a relative path starting with '/'.`);
+    }
+  }
+  if (!path.startsWith("/")) {
+    throw new Error("Invalid path: must start with '/'. Paths must be relative, not absolute URLs.");
+  }
+  try {
+    const testUrl = new URL(path, "https://management.azure.com");
+    if (testUrl.hostname !== "management.azure.com") {
+      throw new Error(`Invalid path: would resolve to different host (${testUrl.hostname}). Path must target management.azure.com.`);
+    }
+  } catch (e) {
+    if (e.message.includes("would resolve to different host")) {
+      throw e;
+    }
+    throw new Error("Invalid path: cannot be parsed as a valid URL component.");
+  }
+}
+function buildAzureUrl(subscriptionId, path, apiVersion, queryParams) {
+  const urlObj = new URL("https://management.azure.com");
+  let pathname = "";
+  if (subscriptionId) {
+    pathname += `/subscriptions/${subscriptionId}`;
+  }
+  pathname += path;
+  urlObj.pathname = pathname;
+  urlObj.searchParams.set("api-version", apiVersion);
+  if (queryParams) {
+    for (const [key, value] of Object.entries(queryParams)) {
+      urlObj.searchParams.append(key, String(value));
+    }
+  }
+  return urlObj.toString();
+}
+function createLokkaServer(ctx) {
+  const server = new McpServer({
+    name: "Lokka-Microsoft",
+    version: "0.3.0-http"
+  });
+  const defaultGraphApiVersion = ctx.useGraphBeta ? "beta" : "v1.0";
+  const graphClient = Client.initWithMiddleware({
+    authProvider: {
+      getAccessToken: async () => ctx.broker.getDownstreamToken(ctx.getAssertion(), GRAPH_SCOPE)
+    }
+  });
+  server.tool(
+    "Lokka-Microsoft",
+    `A versatile tool to interact with Microsoft APIs including Microsoft Graph (Entra) and Azure Resource Management, acting as the signed-in user (delegated permissions). IMPORTANT: For Graph API GET requests using advanced query parameters ($filter, $count, $search, $orderby), you are ADVISED to set 'consistencyLevel: "eventual"'.`,
+    {
+      apiType: z.enum(["graph", "azure"]).describe("Type of Microsoft API to query. Options: 'graph' for Microsoft Graph (Entra) or 'azure' for Azure Resource Management."),
+      path: z.string().describe("The Azure or Graph API URL path to call (e.g. '/users', '/groups', '/subscriptions')"),
+      method: z.enum(["get", "post", "put", "patch", "delete"]).describe("HTTP method to use"),
+      apiVersion: z.string().optional().describe("Azure Resource Management API version (required for apiType Azure)"),
+      subscriptionId: z.string().optional().describe("Azure Subscription ID (for Azure Resource Management)."),
+      queryParams: z.record(z.string()).optional().describe("Query parameters for the request"),
+      body: z.record(z.string(), z.any()).optional().describe("The request body (for POST, PUT, PATCH)"),
+      graphApiVersion: z.enum(["v1.0", "beta"]).optional().default(defaultGraphApiVersion).describe(`Microsoft Graph API version to use (default: ${defaultGraphApiVersion})`),
+      fetchAll: z.boolean().optional().default(false).describe("Set to true to automatically fetch all pages for list results (e.g., users, groups). Default is false."),
+      consistencyLevel: z.string().optional().describe("Graph API ConsistencyLevel header. ADVISED to be set to 'eventual' for Graph GET requests using advanced query parameters ($filter, $count, $search, $orderby).")
+    },
+    async ({ apiType, path, method, apiVersion, subscriptionId, queryParams, body, graphApiVersion, fetchAll, consistencyLevel }) => {
+      const effectiveGraphApiVersion = !ctx.useGraphBeta ? "v1.0" : graphApiVersion;
+      logger.info(`[${ctx.user.preferredUsername || ctx.user.oid}] Lokka-Microsoft: apiType=${apiType}, path=${path}, method=${method}, graphApiVersion=${effectiveGraphApiVersion}, fetchAll=${fetchAll}`);
+      let determinedUrl;
+      try {
+        let responseData;
+        if (apiType === "graph") {
+          determinedUrl = `https://graph.microsoft.com/${effectiveGraphApiVersion}`;
+          let request = graphClient.api(path).version(effectiveGraphApiVersion);
+          if (queryParams && Object.keys(queryParams).length > 0) {
+            request = request.query(queryParams);
+          }
+          if (consistencyLevel) {
+            request = request.header("ConsistencyLevel", consistencyLevel);
+          }
+          switch (method.toLowerCase()) {
+            case "get":
+              if (fetchAll) {
+                const firstPageResponse = await request.get();
+                const odataContext = firstPageResponse["@odata.context"];
+                let allItems = firstPageResponse.value || [];
+                const callback = (item) => {
+                  allItems.push(item);
+                  return true;
+                };
+                const pageIterator = new PageIterator(graphClient, firstPageResponse, callback);
+                await pageIterator.iterate();
+                responseData = { "@odata.context": odataContext, value: allItems };
+              } else {
+                responseData = await request.get();
+              }
+              break;
+            case "post":
+              responseData = await request.post(body ?? {});
+              break;
+            case "put":
+              responseData = await request.put(body ?? {});
+              break;
+            case "patch":
+              responseData = await request.patch(body ?? {});
+              break;
+            case "delete":
+              responseData = await request.delete();
+              if (responseData === void 0 || responseData === null) {
+                responseData = { status: "Success (No Content)" };
+              }
+              break;
+            default:
+              throw new Error(`Unsupported method: ${method}`);
+          }
+        } else {
+          determinedUrl = "https://management.azure.com";
+          if (!apiVersion) {
+            throw new Error("API version is required for Azure Resource Management queries");
+          }
+          validateAzurePath(path);
+          const azureToken = await ctx.broker.getDownstreamToken(ctx.getAssertion(), AZURE_RM_SCOPE);
+          const url = buildAzureUrl(subscriptionId, path, apiVersion, queryParams);
+          const headers = {
+            Authorization: `Bearer ${azureToken}`,
+            "Content-Type": "application/json"
+          };
+          const requestOptions = { method: method.toUpperCase(), headers };
+          if (["POST", "PUT", "PATCH"].includes(method.toUpperCase())) {
+            requestOptions.body = body ? JSON.stringify(body) : JSON.stringify({});
+          }
+          if (fetchAll && method === "get") {
+            let allValues = [];
+            let currentUrl = url;
+            while (currentUrl) {
+              const pageToken = await ctx.broker.getDownstreamToken(ctx.getAssertion(), AZURE_RM_SCOPE);
+              const pageHeaders = { ...headers, Authorization: `Bearer ${pageToken}` };
+              const pageResponse = await fetch(currentUrl, { method: "GET", headers: pageHeaders });
+              const pageText = await pageResponse.text();
+              let pageData;
+              try {
+                pageData = pageText ? JSON.parse(pageText) : {};
+              } catch {
+                pageData = { rawResponse: pageText };
+              }
+              if (!pageResponse.ok) {
+                throw new Error(`API error (${pageResponse.status}) during Azure RM pagination on ${currentUrl}: ${JSON.stringify(pageData)}`);
+              }
+              if (pageData.value && Array.isArray(pageData.value)) {
+                allValues = allValues.concat(pageData.value);
+              } else if (currentUrl === url && !pageData.nextLink) {
+                allValues.push(pageData);
+              }
+              currentUrl = pageData.nextLink || null;
+            }
+            responseData = { allValues };
+          } else {
+            const apiResponse = await fetch(url, requestOptions);
+            const responseText = await apiResponse.text();
+            try {
+              responseData = responseText ? JSON.parse(responseText) : {};
+            } catch {
+              responseData = { rawResponse: responseText };
+            }
+            if (!apiResponse.ok) {
+              throw new Error(`API error (${apiResponse.status}) for Azure RM: ${JSON.stringify(responseData)}`);
+            }
+          }
+        }
+        let resultText = `Result for ${apiType} API (${apiType === "graph" ? effectiveGraphApiVersion : apiVersion}) - ${method} ${path}:
+
+`;
+        resultText += JSON.stringify(responseData, null, 2);
+        if (!fetchAll && method === "get") {
+          const nextLinkKey = apiType === "graph" ? "@odata.nextLink" : "nextLink";
+          if (responseData && responseData[nextLinkKey]) {
+            resultText += `
+
+Note: More results are available. To retrieve all pages, add the parameter 'fetchAll: true' to your request.`;
+          }
+        }
+        return { content: [{ type: "text", text: resultText }] };
+      } catch (error) {
+        logger.error(`Error in Lokka-Microsoft tool (user: ${ctx.user.oid}, apiType: ${apiType}, path: ${path}, method: ${method}):`, error);
+        if (!determinedUrl) {
+          determinedUrl = apiType === "graph" ? `https://graph.microsoft.com/${effectiveGraphApiVersion}` : "https://management.azure.com";
+        }
+        const errorBody = error.body ? typeof error.body === "string" ? error.body : JSON.stringify(error.body) : "N/A";
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              error: error instanceof Error ? error.message : String(error),
+              statusCode: error.statusCode || "N/A",
+              errorBody,
+              attemptedBaseUrl: determinedUrl
+            })
+          }],
+          isError: true
+        };
+      }
+    }
+  );
+  server.tool(
+    "get-auth-status",
+    "Shows who is signed in to this Lokka session and how authentication works (delegated OAuth with On-Behalf-Of).",
+    {},
+    async () => ({
+      content: [{
+        type: "text",
+        text: JSON.stringify({
+          mode: "delegated-http",
+          signedInUser: ctx.user.preferredUsername || ctx.user.name || ctx.user.oid,
+          userObjectId: ctx.user.oid,
+          tenantId: ctx.user.tid,
+          apiScopes: ctx.user.scopes,
+          note: "All Graph/Azure calls run as this user via the On-Behalf-Of flow. Effective permissions = the intersection of the app's delegated permissions and this user's own privileges."
+        }, null, 2)
+      }]
+    })
+  );
+  return server;
+}
+export {
+  createLokkaServer,
+  createSessionContext
+};
